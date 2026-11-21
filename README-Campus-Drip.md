@@ -21,6 +21,8 @@ This is a final project for **CS0045 – Computer Graphics**. The program intent
 - Basic lighting and material properties
 - On-screen customization menu and instructions
 - Outfit-confirmation message
+- Pressing `C` confirms the outfit and starts a continuous character celebration animation with jumps, side-to-side movement, and a slight tilt
+- Changing any customization or the character base stops the celebration until the outfit is confirmed again
 
 ## Controls
 
@@ -32,7 +34,7 @@ This is a final project for **CS0045 – Computer Graphics**. The program intent
 | Hold and drag left mouse button | Revolve the camera around the character |
 | Mouse wheel | Zoom in or out |
 | `R` | Reset the camera |
-| `C` | Confirm the current outfit |
+| `C` | Confirm the current outfit and start the jump-and-side celebration |
 | `Esc` | Close the program |
 
 ## Files Needed
@@ -153,6 +155,7 @@ Avoid adding features outside the module scope, such as:
 | `specialKeys()` | Handles arrow-key customization |
 | `mouse()` | Starts camera dragging and controls zoom |
 | `mouseMotion()` | Updates the orbit camera while the mouse is dragged |
+| `idle()` | Requests repeated redraws while the confirmed outfit is being animated |
 
 ## Areas for Improvement
 
