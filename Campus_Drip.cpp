@@ -31,6 +31,7 @@ bool dragging = false;
 int previousMouseX = 0;
 int previousMouseY = 0;
 bool confirmed = false;
+int celebrationStartTime = 0;
 
 int windowWidth = 1100;
 int windowHeight = 700;
@@ -69,6 +70,7 @@ void mouseMotion(int x, int y);
 void initializeScene();
 void drawCharacter();
 void drawInterface();
+void idle();
 
 // ============================================================
 // MODULES 1-2: COLORS, PRIMITIVES, AND BASIC OBJECTS
@@ -497,6 +499,19 @@ void display()
     drawCampusBackground();
 
     glPushMatrix();
+        if (confirmed)
+        {
+            float elapsedSeconds =
+                (glutGet(GLUT_ELAPSED_TIME) - celebrationStartTime) / 1000.0f;
+            float movementPhase = elapsedSeconds * 4.0f;
+            float sideOffset = std::sin(movementPhase) * 1.05f;
+            float jumpValue = std::sin(movementPhase * 1.5f);
+            float jumpOffset = (jumpValue > 0.0f) ? jumpValue * 0.75f : 0.0f;
+            float tilt = std::sin(movementPhase) * 4.0f;
+
+            glTranslatef(sideOffset, jumpOffset, 0.0f);
+            glRotatef(tilt, 0.0f, 0.0f, 1.0f);
+        }
         drawCharacter();
     glPopMatrix();
 
@@ -540,6 +555,7 @@ void keyboard(unsigned char key, int x, int y)
     else if (key == 'c' || key == 'C')
     {
         confirmed = true;
+        celebrationStartTime = glutGet(GLUT_ELAPSED_TIME);
     }
     else if (key == 'r' || key == 'R')
     {
@@ -643,6 +659,12 @@ void mouseMotion(int x, int y)
     glutPostRedisplay();
 }
 
+void idle()
+{
+    if (confirmed)
+        glutPostRedisplay();
+}
+
 int main(int argc, char** argv)
 {
     glutInit(&argc, argv);
@@ -659,6 +681,7 @@ int main(int argc, char** argv)
     glutSpecialFunc(specialKeys);
     glutMouseFunc(mouse);
     glutMotionFunc(mouseMotion);
+    glutIdleFunc(idle);
 
     glutMainLoop();
     return 0;
