@@ -1,1 +1,14 @@
+# Compiled programs
+*.exe
 
+# Visual Studio build files
+*.obj
+*.ilk
+*.pdb
+
+# Runtime libraries copied during building
+*.dll
+
+# Accidental Git metadata backup
+.git-source-code-backup/
+.git-source-code-backup
