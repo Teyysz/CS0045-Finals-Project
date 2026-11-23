@@ -1,157 +1,76 @@
 # Campus Drip: 3D Pixel Character Customizer
 
-Campus Drip is a 3D character-customization program written in C++ using legacy OpenGL, GLEW, and FreeGLUT. Players can create a block-style campus character, change its outfit and background, and freely rotate the camera around the finished look.
+A beginner-friendly C++ / legacy OpenGL / FreeGLUT / GLEW project for CS0045 (Modules 1-8).
+Create a 3D low-poly campus student, pick a pose, and keep up to three characters for the current session.
 
-The project stays within the concepts introduced in **CS0045 Modules 1–8**: primitives, callbacks, vertex arrays and VBOs, transformations, perspective viewing, depth testing, lighting, and bitmap text.
+## Screens
 
-## Current features
+Welcome -> Main Menu -> (Create New Character | Saved Characters) -> Customize -> Showcase (poses) -> Save
 
-- Block-style 3D male and female base characters
-- Customizable hair, top, bottom, shoes, and accessory
-- Night, sunset, and daytime campus themes
-- Campus environment with buildings, trees, benches, and lamps
-- Mouse-controlled orbit camera and zoom
-- Perspective projection, depth testing, and basic lighting
-- VBO-rendered ground
-- Welcome, customization, and outfit-confirmation screens
-- On-screen instructions using GLUT bitmap text
-
-## Project modules
-
-| Module | Files | Responsibility |
-|---|---|---|
-| Application core | `App/App.cpp`, `App/App.h` | Shared state, themes, camera, display loop, initialization, and `main()` |
-| Campus world | `World/World.cpp`, `World/World.h` | Drawing helpers, VBO setup, lighting, ground, buildings, trees, and props |
-| Character | `Character/Character.cpp`, `Character/Character.h` | Body, face, hair, clothes, shoes, accessories, and character assembly |
-| Interface and controls | `Interface/Interface.cpp`, `Interface/Interface.h` | Bitmap text, menus, overlays, keyboard controls, mouse orbit, and zoom |
-
-## Folder structure
-
-```text
-Final Project/
-|-- App/
-|   |-- App.cpp
-|   `-- App.h
-|-- World/
-|   |-- World.cpp
-|   `-- World.h
-|-- Character/
-|   |-- Character.cpp
-|   `-- Character.h
-|-- Interface/
-|   |-- Interface.cpp
-|   `-- Interface.h
-|-- .vscode/
-|   `-- tasks.json
-|-- build-modular.bat
-|-- .gitignore
-`-- README.md
-```
-
-## Requirements
-
-- Windows 10 or Windows 11
-- Visual Studio Build Tools 2026 with **Desktop development with C++**
-- VS Code with the Microsoft C/C++ extension
-- vcpkg installation containing GLEW, FreeGLUT, and OpenGL
-
-The build script expects `vcpkg_installed` beside the project:
-
-```text
-SOURCE CODE/
-|-- Final Project/
-`-- vcpkg_installed/
-    `-- x64-windows/
-```
-
-## Build and run
-
-1. Open the **Final Project** folder itself in VS Code.
-2. Press **Ctrl+Shift+B**.
-3. Select **Build Campus Drip (all modules)** if prompted.
-4. Wait for `Build completed successfully.`
-5. Run from Bash:
-
-```bash
-./Campus_Drip.exe
-```
-
-In Windows Command Prompt, run:
-
-```cmd
-Campus_Drip.exe
-```
-
-Do not select a generic **build active file** task. All four implementation files must be compiled and linked together.
+| Screen | What it does |
+|---|---|
+| Welcome | "PRESS ANY KEY TO CONTINUE". Any normal key continues, Esc exits. |
+| Main Menu | CREATE NEW CHARACTER / SAVED CHARACTERS / EXIT |
+| Saved Characters | Three session-only slots: view, edit, create, overwrite, delete |
+| Customize | Base (male/female), hair, top, bottom, shoes, accessory, background |
+| Showcase | Outfit summary, pose selection, save |
 
 ## Controls
 
-| Control | Action |
+| Key / Mouse | Where | Action |
+|---|---|---|
+| Any normal key | Welcome | Continue to the main menu |
+| Up / Down | Main menu | Move selection |
+| Enter | Main menu | Choose the highlighted item |
+| Up / Down | Saved screen | Select slot |
+| Enter or V | Saved screen | View a saved character (or create one in an empty slot) |
+| E | Saved screen | Edit the selected character |
+| D (press twice) | Saved screen | Delete the selected character |
+| Backspace | Saved screen | Back to the main menu |
+| Up / Down | Customize | Select category |
+| Left / Right | Customize | Change option |
+| G | Customize | Switch male/female base |
+| C | Customize | Confirm outfit (go to Showcase) |
+| Backspace | Customize | Back to the main menu |
+| Left / Right | Showcase | Change pose |
+| Enter | Showcase | Confirm pose |
+| S | Showcase | Save: opens the slot picker (Enter saves, overwriting an occupied slot; Backspace cancels) |
+| Backspace | Showcase | Back to Customize |
+| M | Showcase | Main menu |
+| Mouse drag | All | Orbit camera |
+| Mouse wheel | All | Zoom |
+| R | All (after Welcome) | Reset the camera for the current screen |
+| Esc | All | Exit |
+
+## Saving
+
+Characters are saved for this session only. The three slots are a plain array of structs in memory
+(`savedSlots` in `App.cpp`), so they reset when the program closes. Each slot stores: whether it is occupied,
+base, hair, top, bottom, shoes, accessory, background, pose and an automatic name ("CHARACTER 1", ...).
+
+## Module responsibilities
+
+| Folder | Responsibility |
 |---|---|
-| Enter | Start from the welcome screen |
-| Up/Down Arrow | Move through customization categories |
-| Left/Right Arrow | Change the selected option |
-| G | Switch between male and female bases |
-| C | Confirm the outfit and enter showcase mode |
-| Backspace | Return to outfit customization |
-| Hold Left Mouse + Drag | Orbit the camera |
-| Mouse Wheel | Zoom in or out |
-| R | Reset the camera |
-| Esc | Exit |
+| `App/` | Shared state and enums, screen flow, save slots, camera presets and framing, display / reshape / timer callbacks, `main()` |
+| `World/` | Shape helpers (blocks, spheres, cylinders, cones, gable roof), VBO ground, lighting, campus buildings, trees, lamps, benches, sky |
+| `Character/` | Male and female models, hierarchical limbs, poses, hair, clothing, shoes, accessories |
+| `Interface/` | Bitmap text, all screens and menus, keyboard, special-key and mouse input |
 
-## Suggested responsibility for four members
+Headers include each other with relative paths (for example `#include "../App/App.h"`), so no extra include
+directories are required.
 
-- **Member 1 — App:** camera behavior, screen transitions, shared state, and timing
-- **Member 2 — World:** campus scenery, VBO ground, lighting, and themes
-- **Member 3 — Character:** body design, outfits, hair, shoes, and accessories
-- **Member 4 — Interface:** menus, text, layout, controls, and interaction feedback
+## Build
 
-Coordinate edits to `App/App.h` because it contains shared declarations used by the other modules.
+Use the existing VS Code build task (Ctrl+Shift+B), which runs `build-modular.bat`. The four `.cpp` files
+(`App/App.cpp`, `World/World.cpp`, `Character/Character.cpp`, `Interface/Interface.cpp`) must all be compiled
+and linked together with `glew32.lib`, `freeglut.lib`, `opengl32.lib` and `glu32.lib`
+(the `#pragma comment(lib, ...)` lines in `App.cpp` also request them). Keep `glew32.dll` and `freeglut.dll`
+next to the `.exe` or on `PATH`.
 
-## Git workflow
+## Limitations
 
-Create a feature branch before changing a module:
-
-```bash
-git switch main
-git pull origin main
-git switch -c feature/character-improvements
-```
-
-After making and testing changes:
-
-```bash
-git add Character
-git commit -m "Improve character customization"
-git push -u origin feature/character-improvements
-```
-
-Create a pull request on GitHub and merge only after another member reviews and tests the change. Generated `.exe`, `.dll`, `.obj`, `.pdb`, and `.ilk` files should not be committed.
-
-## Coding guidelines
-
-- Keep improvements inside their corresponding module whenever possible.
-- Put declarations in header files and implementations in `.cpp` files.
-- Reuse existing drawing helpers instead of duplicating OpenGL code.
-- Match every `glPushMatrix()` with `glPopMatrix()`.
-- Reset temporary OpenGL states after use.
-- Build and run the complete program before committing.
-- Stay within the covered course modules unless the group and instructor approve otherwise.
-
-## Possible improvements
-
-- Add more campus-themed outfits, hairstyles, and accessories
-- Add clearer selection feedback and small UI animations
-- Add more campus props and environmental details
-- Add simple character poses or movement after confirmation
-- Improve camera easing and zoom limits
-- Add a randomize-outfit option
-- Add save/load functionality if allowed by the project scope
-
-## Known limitations
-
-- The program uses legacy OpenGL to follow the course modules.
-- The character and environment use basic block geometry.
-- No external texture assets are currently required.
-- The build script targets the group’s Visual Studio 2026 and vcpkg folder layout.
-
+- Save slots are session-only (no file saving).
+- The window has a minimum size of 900 x 640; smaller windows are resized up.
+- The campus is a diorama: the far side of the buildings is plain when the camera orbits behind them.
+- Wheel zoom relies on FreeGLUT reporting the wheel as buttons 3 and 4.

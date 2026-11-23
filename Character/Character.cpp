@@ -1,347 +1,884 @@
 #include "Character.h"
-#include "World.h"
+#include "../World/World.h"
 
 // ============================================================
-// MODULE 3 OF 4: CHARACTER
-// Owns the block character, body parts, outfits, and accessories.
+// PART 3 OF 4: CHARACTER
+// Owns the male and female models, body parts, hair, clothing,
+// shoes, accessories and poses.
+//
+// Local coordinates: feet at y = 0, the character faces +Z.
+// "side" is -1 for the left half of the screen (x < 0) and +1 for the
+// right half when you look at the front of the character.
+//
+// MODULE 6/7: limbs are hierarchical. Each arm/leg is drawn inside
+// glPushMatrix()/glPopMatrix() and moved to its pivot with
+// glTranslatef(), then bent with glRotatef() at the shoulder/hip and
+// again at the elbow/knee. Clothes are drawn inside the same transforms,
+// so they follow every pose.
 // ============================================================
 
-void drawBodyBase(float bodyWidth)
+namespace
 {
-    float armX = bodyWidth * 0.5f + 0.20f;
 
-    drawBlock(0.0f, 3.62f, 0.0f, 0.44f, 0.40f, 0.44f, SKIN_SHADE);   // neck
+// ---------- body landmarks (y positions) ----------
+const float HIP_Y = 2.55f;
+const float THIGH_LEN = 1.15f;
+const float SHIN_LEN = 1.00f;          // ankle ends at y = 0.4
+const float SHOULDER_Y = 3.95f;
+const float UPPER_ARM_LEN = 0.95f;
+const float FOREARM_LEN = 0.85f;
+const float NECK_Y = 4.30f;            // pivot used when the head turns
+const float HEAD_Y = 5.10f;            // center of the head
 
-    for (int side = -1; side <= 1; side += 2)
+float maxF(float a, float b) { return (a > b) ? a : b; }
+float minF(float a, float b) { return (a < b) ? a : b; }
+
+// ============================================================
+// REQUIREMENT: distinct male and female proportions
+// ============================================================
+struct Shape
+{
+    float chestRx, chestRz;
+    float waistRx, waistRz;
+    float hipRx, hipRz;
+    float shoulderX;     // distance from the center to a shoulder pivot
+    float armR;
+    float legX;          // distance from the center to a hip pivot
+    float legR;
+    float headR;
+};
+
+Shape getShape()
+{
+    Shape s;
+    if (genderChoice == 0)   // male: broad shoulders, straighter waist
     {
-        drawBlock(side * armX, 3.05f, 0.0f, ARM_W, 0.90f, ARM_D, SKIN);   // upper arm
-        drawBlock(side * armX, 2.25f, 0.0f, ARM_W, 0.70f, ARM_D, SKIN);   // forearm
-        drawBlock(side * armX, 1.72f, 0.0f, 0.40f, 0.36f, 0.50f, SKIN);   // hand
+        s.chestRx = 0.80f; s.chestRz = 0.46f;
+        s.waistRx = 0.68f; s.waistRz = 0.42f;
+        s.hipRx = 0.66f;   s.hipRz = 0.42f;
+        s.shoulderX = 1.08f; s.armR = 0.26f;
+        s.legX = 0.36f;    s.legR = 0.31f;
+        s.headR = 0.62f;
+    }
+    else                     // female: narrower shoulders, defined waist, rounder hips
+    {
+        s.chestRx = 0.64f; s.chestRz = 0.40f;
+        s.waistRx = 0.50f; s.waistRz = 0.35f;
+        s.hipRx = 0.68f;   s.hipRz = 0.42f;
+        s.shoulderX = 0.88f; s.armR = 0.21f;
+        s.legX = 0.34f;    s.legR = 0.27f;
+        s.headR = 0.64f;
+    }
+    return s;
+}
+
+// The torso is three oval cylinders stacked on each other
+struct Segment
+{
+    float y0, y1, rx, rz;
+};
+
+void getSegments(const Shape& s, Segment out[3])
+{
+    Segment hips = { 2.35f, 2.95f, s.hipRx, s.hipRz };
+    Segment waist = { 2.95f, 3.45f, s.waistRx, s.waistRz };
+    Segment chest = { 3.45f, 4.05f, s.chestRx, s.chestRz };
+    out[0] = hips;
+    out[1] = waist;
+    out[2] = chest;
+}
+
+// Draws the part of the torso between two heights, slightly "grown"
+// outward so clothes sit on top of the skin.
+void drawTorsoBand(const Shape& s, float yBottom, float yTop,
+                   float grow, const Color& c)
+{
+    Segment segs[3];
+    getSegments(s, segs);
+
+    for (int i = 0; i < 3; i++)
+    {
+        float lo = maxF(yBottom, segs[i].y0);
+        float hi = minF(yTop, segs[i].y1);
+        if (hi - lo > 0.001f)
+            drawCylinderY(0.0f, lo, 0.0f,
+                          segs[i].rx + grow, segs[i].rz + grow, hi - lo, c);
     }
 }
 
-// Face details are all on the FRONT (+Z) of the head
-void drawHead()
+// Depth (z) of the chest surface at a given x, used to place details
+float chestZ(const Shape& s, float x, float grow)
 {
+    float k = 1.0f - (x * x) / ((s.chestRx + grow) * (s.chestRx + grow));
+    if (k < 0.0f) k = 0.0f;
+    return (s.chestRz + grow) * sqrtf(k);
+}
+
+// ============================================================
+// REQUIREMENT: poses (angles in degrees)
+// shoulderPitch: + raises the arm forward   shoulderRoll: + moves it outward
+// elbowBend:     + bends the forearm forward  elbowFold: + folds it outward
+// hipPitch:      + swings the leg forward     knee: + bends the shin backward
+// ============================================================
+struct PoseAngles
+{
+    float shoulderPitch[2];
+    float shoulderRoll[2];
+    float elbowBend[2];
+    float elbowFold[2];
+    float hipPitch[2];
+    float knee[2];
+    float headYaw;
+    float headTilt;
+    float bodyDrop;
+    bool peaceHand[2];
+};
+
+PoseAngles getPoseAngles(int pose)
+{
+    PoseAngles p = {};
+
+    // Relaxed default for every pose
+    for (int i = 0; i < 2; i++)
+    {
+        p.shoulderRoll[i] = 7.0f;
+        p.elbowBend[i] = 8.0f;
+    }
+
+    if (pose == POSE_WAVE)   // index 1 = right side of the screen
+    {
+        float t = glutGet(GLUT_ELAPSED_TIME) * 0.001f;
+        p.shoulderRoll[1] = 95.0f;
+        p.elbowBend[1] = 0.0f;
+        p.elbowFold[1] = 80.0f + 22.0f * sinf(t * 7.0f);   // waving hand
+        p.headTilt = 6.0f;
+    }
+    else if (pose == POSE_PEACE)
+    {
+        p.shoulderPitch[1] = 80.0f;
+        p.shoulderRoll[1] = -22.0f;
+        p.elbowBend[1] = 100.0f;
+        p.peaceHand[1] = true;
+        p.headTilt = -5.0f;
+        p.headYaw = -8.0f;
+    }
+    else if (pose == POSE_HIP)   // both hands on the hips
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            p.shoulderPitch[i] = -12.0f;
+            p.shoulderRoll[i] = 30.0f;
+            p.elbowBend[i] = 0.0f;
+            p.elbowFold[i] = -90.0f;
+        }
+        p.hipPitch[1] = 10.0f;
+        p.knee[1] = 14.0f;
+        p.headYaw = 10.0f;
+        p.headTilt = 4.0f;
+    }
+    else if (pose == POSE_WALK)  // mid-stride with swinging arms
+    {
+        p.hipPitch[1] = 25.0f;
+        p.knee[1] = 10.0f;
+        p.hipPitch[0] = -20.0f;
+        p.knee[0] = 30.0f;
+        p.shoulderPitch[1] = -30.0f;
+        p.elbowBend[1] = 15.0f;
+        p.shoulderPitch[0] = 30.0f;
+        p.elbowBend[0] = 35.0f;
+        p.bodyDrop = 0.14f;
+    }
+    return p;
+}
+
+// ============================================================
+// REQUIREMENT: separate male and female outfits
+// ============================================================
+struct TopStyle
+{
+    Color body, sleeve, trim, accent;
+    float upperCover;    // 0..1 of the upper arm covered from the shoulder
+    float lowerCover;    // 0..1 of the forearm covered from the elbow
+    float sleeveGrow;
+    float bodyGrow;
+    float bodyBottom;    // lowest y of the jacket/shirt
+    bool cuff;
+    bool stripes;
+};
+
+TopStyle getTopStyle()
+{
+    TopStyle t = {};
+    int style = selection[CAT_TOP];
+
+    if (genderChoice == 0)
+    {
+        if (style == 0)        // varsity jacket
+        {
+            t.body = rgb(0.52f, 0.06f, 0.13f); t.sleeve = rgb(0.90f, 0.84f, 0.72f);
+            t.trim = rgb(0.34f, 0.04f, 0.09f); t.accent = rgb(0.95f, 0.78f, 0.20f);
+            t.upperCover = 1.0f; t.lowerCover = 1.0f; t.sleeveGrow = 0.08f;
+            t.bodyGrow = 0.09f; t.bodyBottom = 2.45f; t.cuff = true; t.stripes = true;
+        }
+        else if (style == 1)   // school uniform
+        {
+            t.body = rgb(0.93f, 0.94f, 0.97f); t.sleeve = rgb(0.93f, 0.94f, 0.97f);
+            t.trim = rgb(0.08f, 0.16f, 0.45f); t.accent = rgb(0.72f, 0.75f, 0.82f);
+            t.upperCover = 0.60f; t.lowerCover = 0.0f; t.sleeveGrow = 0.06f;
+            t.bodyGrow = 0.05f; t.bodyBottom = 2.50f;
+        }
+        else                   // campus tee
+        {
+            t.body = rgb(0.12f, 0.55f, 0.45f); t.sleeve = rgb(0.12f, 0.55f, 0.45f);
+            t.trim = rgb(0.08f, 0.36f, 0.30f); t.accent = rgb(0.98f, 0.82f, 0.25f);
+            t.upperCover = 0.62f; t.lowerCover = 0.0f; t.sleeveGrow = 0.12f;
+            t.bodyGrow = 0.12f; t.bodyBottom = 2.40f;
+        }
+    }
+    else
+    {
+        if (style == 0)        // cropped varsity jacket
+        {
+            t.body = rgb(0.55f, 0.07f, 0.20f); t.sleeve = rgb(0.92f, 0.86f, 0.76f);
+            t.trim = rgb(0.36f, 0.04f, 0.12f); t.accent = rgb(0.95f, 0.78f, 0.20f);
+            t.upperCover = 1.0f; t.lowerCover = 1.0f; t.sleeveGrow = 0.07f;
+            t.bodyGrow = 0.08f; t.bodyBottom = 3.00f; t.cuff = true; t.stripes = true;
+        }
+        else if (style == 1)   // school blouse with ribbon
+        {
+            t.body = rgb(0.97f, 0.97f, 1.00f); t.sleeve = rgb(0.97f, 0.97f, 1.00f);
+            t.trim = rgb(0.08f, 0.16f, 0.45f); t.accent = rgb(0.85f, 0.15f, 0.25f);
+            t.upperCover = 0.42f; t.lowerCover = 0.0f; t.sleeveGrow = 0.13f;
+            t.bodyGrow = 0.05f; t.bodyBottom = 2.70f;
+        }
+        else                   // oversized tee
+        {
+            t.body = rgb(0.68f, 0.60f, 0.90f); t.sleeve = rgb(0.68f, 0.60f, 0.90f);
+            t.trim = rgb(0.50f, 0.42f, 0.75f); t.accent = rgb(1.00f, 0.88f, 0.30f);
+            t.upperCover = 0.72f; t.lowerCover = 0.0f; t.sleeveGrow = 0.17f;
+            t.bodyGrow = 0.17f; t.bodyBottom = 2.30f;
+        }
+    }
+    return t;
+}
+
+struct BottomStyle
+{
+    Color main, trim, belt, sock;
+    float thighCover;    // 0..1 of the thigh covered from the hip
+    float shinCover;     // 0..1 of the shin covered from the knee
+    float thighGrow;
+    float shinGrow;
+    float sockCover;     // 0..1 of the shin covered by a sock from the ankle
+    float hipTop;        // top of the waistband
+    float hipGrow;
+    bool skirt;
+    bool cuff;
+    bool cargoPockets;
+    bool backPockets;
+};
+
+BottomStyle getBottomStyle()
+{
+    BottomStyle b = {};
+    int style = selection[CAT_BOTTOM];
+    b.sock = rgb(0.95f, 0.95f, 0.95f);
+
+    if (genderChoice == 0)
+    {
+        b.hipTop = 3.00f; b.hipGrow = 0.07f; b.backPockets = true;
+        if (style == 0)        // cargo pants
+        {
+            b.main = rgb(0.34f, 0.38f, 0.22f); b.trim = rgb(0.24f, 0.27f, 0.15f);
+            b.belt = rgb(0.15f, 0.12f, 0.10f);
+            b.thighCover = 1.0f; b.shinCover = 1.0f;
+            b.thighGrow = 0.10f; b.shinGrow = 0.08f;
+            b.cuff = true; b.cargoPockets = true;
+        }
+        else if (style == 1)   // jeans
+        {
+            b.main = rgb(0.13f, 0.28f, 0.55f); b.trim = rgb(0.25f, 0.45f, 0.75f);
+            b.belt = rgb(0.30f, 0.18f, 0.09f);
+            b.thighCover = 1.0f; b.shinCover = 1.0f;
+            b.thighGrow = 0.06f; b.shinGrow = 0.05f;
+            b.cuff = true;
+        }
+        else                   // shorts
+        {
+            b.main = rgb(0.78f, 0.66f, 0.45f); b.trim = rgb(0.60f, 0.50f, 0.32f);
+            b.belt = rgb(0.30f, 0.30f, 0.38f);
+            b.thighCover = 0.72f; b.shinCover = 0.0f;
+            b.thighGrow = 0.09f; b.sockCover = 0.30f;
+        }
+    }
+    else
+    {
+        if (style == 0)        // pleated skirt with knee socks
+        {
+            b.main = rgb(0.20f, 0.22f, 0.45f); b.trim = rgb(0.90f, 0.35f, 0.45f);
+            b.belt = rgb(0.12f, 0.13f, 0.30f);
+            b.skirt = true; b.hipTop = 3.10f; b.hipGrow = 0.07f;
+            b.sockCover = 0.85f;
+        }
+        else if (style == 1)   // wide-leg pants (flare toward the ankle)
+        {
+            b.main = rgb(0.52f, 0.60f, 0.52f); b.trim = rgb(0.40f, 0.48f, 0.40f);
+            b.belt = rgb(0.40f, 0.48f, 0.40f);
+            b.thighCover = 1.0f; b.shinCover = 1.0f;
+            b.thighGrow = 0.06f; b.shinGrow = 0.17f;
+            b.hipTop = 3.20f; b.hipGrow = 0.06f;
+        }
+        else                   // denim shorts with ankle socks
+        {
+            b.main = rgb(0.35f, 0.55f, 0.80f); b.trim = rgb(0.80f, 0.90f, 1.00f);
+            b.belt = rgb(0.25f, 0.40f, 0.62f);
+            b.thighCover = 0.60f; b.shinCover = 0.0f;
+            b.thighGrow = 0.07f; b.sockCover = 0.35f;
+            b.hipTop = 2.95f; b.hipGrow = 0.06f;
+        }
+    }
+    return b;
+}
+
+// ============================================================
+// SHOES (drawn at the ankle; the floor is 0.4 below the ankle)
+// ============================================================
+void drawShoe(int side)
+{
+    int style = selection[CAT_SHOES];
     bool female = (genderChoice == 1);
-    Color dark = rgb(0.05f, 0.04f, 0.04f);
-    Color browColor = rgb(0.10f, 0.06f, 0.04f);
+    float shinR = 0.27f * 0.82f;
 
-    drawBlock(0.0f, 4.25f, 0.0f, 1.20f, 1.10f, 1.10f, SKIN);          // head
-    drawBlock(-0.65f, 4.15f, 0.0f, 0.12f, 0.34f, 0.30f, SKIN_SHADE);  // ears
-    drawBlock(0.65f, 4.15f, 0.0f, 0.12f, 0.34f, 0.30f, SKIN_SHADE);
+    float soleH = 0.14f;
+    Color sole, upper, accent;
 
+    if (!female)
+    {
+        if (style == 0)      { soleH = 0.14f; sole = rgb(0.78f, 0.80f, 0.85f); upper = rgb(0.95f, 0.95f, 0.97f); accent = rgb(0.80f, 0.10f, 0.15f); }
+        else if (style == 1) { soleH = 0.20f; sole = rgb(0.97f, 0.97f, 0.97f); upper = rgb(0.08f, 0.70f, 0.82f); accent = rgb(1.00f, 0.55f, 0.10f); }
+        else                 { soleH = 0.10f; sole = rgb(0.22f, 0.13f, 0.08f); upper = rgb(0.07f, 0.07f, 0.09f); accent = rgb(0.40f, 0.40f, 0.45f); }
+    }
+    else
+    {
+        if (style == 0)      { soleH = 0.24f; sole = rgb(0.97f, 0.97f, 0.97f); upper = rgb(0.96f, 0.90f, 0.95f); accent = rgb(0.95f, 0.45f, 0.65f); }
+        else if (style == 1) { soleH = 0.10f; sole = rgb(0.12f, 0.10f, 0.10f); upper = rgb(0.08f, 0.08f, 0.10f); accent = rgb(0.90f, 0.75f, 0.30f); }
+        else                 { soleH = 0.14f; sole = rgb(0.20f, 0.12f, 0.07f); upper = rgb(0.42f, 0.25f, 0.14f); accent = rgb(0.85f, 0.70f, 0.30f); }
+    }
+
+    float base = -0.40f;                       // floor level in this frame
+    float uy = base + soleH + 0.15f;           // center height of the upper
+
+    drawBlock(0.0f, base + soleH * 0.5f, 0.22f, 0.66f, soleH, 1.30f, sole);   // sole
+    drawBlock(0.0f, uy, 0.12f, 0.58f, 0.30f, 0.80f, upper);                   // body
+    drawSphere(0.0f, uy - 0.02f, 0.52f, 0.29f, 0.17f, 0.30f, upper);          // rounded toe
+    drawSphere(0.0f, uy, -0.20f, 0.29f, 0.16f, 0.20f, upper);                 // heel
+
+    if (!female && style == 0)           // sneakers: laces + heel tab
+    {
+        for (int i = 0; i < 3; i++)
+            drawBlock(0.0f, uy + 0.16f, 0.02f + i * 0.17f, 0.36f, 0.03f, 0.07f, rgb(0.55f, 0.62f, 0.80f));
+        drawBlock(0.0f, uy + 0.04f, -0.34f, 0.30f, 0.20f, 0.05f, accent);
+    }
+    else if (!female && style == 1)      // runners: side stripe + tongue
+    {
+        drawBlock(side * 0.30f, uy, 0.12f, 0.03f, 0.12f, 0.55f, accent);
+        drawBlock(0.0f, uy + 0.16f, 0.05f, 0.30f, 0.05f, 0.30f, rgb(0.98f, 0.85f, 0.25f));
+    }
+    else if (!female && style == 2)      // dark shoes: shine and laces
+    {
+        drawBlock(0.0f, uy + 0.16f, 0.55f, 0.40f, 0.03f, 0.20f, accent);
+        drawBlock(0.0f, uy + 0.16f, 0.05f, 0.36f, 0.03f, 0.05f, accent);
+        drawBlock(0.0f, uy + 0.16f, 0.20f, 0.36f, 0.03f, 0.05f, accent);
+    }
+    else if (female && style == 0)       // chunky sneakers: pink accents
+    {
+        drawBlock(0.0f, uy + 0.16f, 0.15f, 0.36f, 0.04f, 0.40f, accent);
+        drawBlock(side * 0.30f, uy, 0.0f, 0.03f, 0.14f, 0.50f, accent);
+    }
+    else if (female && style == 1)       // mary janes: strap and gold buckle
+    {
+        drawBlock(0.0f, uy + 0.08f, 0.14f, 0.62f, 0.07f, 0.10f, upper);
+        drawSphere(0.0f, uy + 0.10f, 0.14f, 0.07f, 0.07f, 0.07f, accent);
+    }
+    else                                 // ankle boots: shaft, strap and buckle
+    {
+        drawCylinderY(0.0f, base + soleH, 0.0f, shinR + 0.10f, shinR + 0.10f, 0.55f, upper);
+        drawCylinderY(0.0f, 0.05f, 0.0f, shinR + 0.12f, shinR + 0.12f, 0.08f, accent);
+    }
+}
+
+// ============================================================
+// HAND (peace sign adds two spread fingers)
+// ============================================================
+void drawHand(bool peace)
+{
+    glPushMatrix();
+        glTranslatef(0.0f, -FOREARM_LEN - 0.04f, 0.0f);
+        drawSphere(0.0f, 0.0f, 0.0f, 0.21f, 0.23f, 0.21f, SKIN);
+        drawSphere(0.0f, -0.12f, 0.10f, 0.12f, 0.10f, 0.08f, SKIN);   // curled fingers
+
+        if (peace)
+        {
+            for (int f = -1; f <= 1; f += 2)
+            {
+                glPushMatrix();
+                    glRotatef(f * 14.0f, 0.0f, 0.0f, 1.0f);
+                    drawCylinderY(0.0f, -0.66f, 0.0f, 0.055f, 0.055f, 0.55f, SKIN);
+                    drawSphere(0.0f, -0.66f, 0.0f, 0.06f, 0.06f, 0.06f, SKIN);
+                glPopMatrix();
+            }
+        }
+    glPopMatrix();
+}
+
+// ============================================================
+// ARM: shoulder joint -> upper arm -> elbow joint -> forearm -> hand
+// ============================================================
+void drawArm(int side, const PoseAngles& p, const TopStyle& ts, const Shape& s)
+{
+    int i = (side < 0) ? 0 : 1;
+    float r = s.armR;
+    float foreR = r * 0.88f;
+
+    glPushMatrix();
+        glTranslatef(side * s.shoulderX, SHOULDER_Y, 0.0f);          // shoulder pivot
+        glRotatef(-p.shoulderPitch[i], 1.0f, 0.0f, 0.0f);
+        glRotatef(side * p.shoulderRoll[i], 0.0f, 0.0f, 1.0f);
+
+        // Shoulder joint and upper arm
+        drawSphere(0.0f, 0.0f, 0.0f, r * 1.2f, r * 1.2f, r * 1.2f, SKIN);
+        drawCylinderY(0.0f, -UPPER_ARM_LEN, 0.0f, r, r, UPPER_ARM_LEN, SKIN);
+
+        if (ts.upperCover > 0.0f)
+        {
+            float len = UPPER_ARM_LEN * ts.upperCover;
+            float sr = r + ts.sleeveGrow;
+            drawSphere(0.0f, 0.0f, 0.0f, sr * 1.15f, sr * 1.15f, sr * 1.15f, ts.sleeve);
+            drawCylinderY(0.0f, -len, 0.0f, sr, sr, len, ts.sleeve);
+            if (ts.stripes)
+            {
+                drawCylinderY(0.0f, -0.40f, 0.0f, sr + 0.02f, sr + 0.02f, 0.07f, ts.body);
+                drawCylinderY(0.0f, -0.55f, 0.0f, sr + 0.02f, sr + 0.02f, 0.07f, ts.body);
+            }
+            else if (ts.upperCover < 0.99f)   // short sleeve hem
+            {
+                drawCylinderY(0.0f, -len, 0.0f, sr + 0.015f, sr + 0.015f, 0.08f, ts.trim);
+            }
+        }
+
+        // Elbow
+        glTranslatef(0.0f, -UPPER_ARM_LEN, 0.0f);
+        glRotatef(-p.elbowBend[i], 1.0f, 0.0f, 0.0f);
+        glRotatef(side * p.elbowFold[i], 0.0f, 0.0f, 1.0f);
+
+        drawSphere(0.0f, 0.0f, 0.0f, r * 0.98f, r * 0.98f, r * 0.98f, SKIN);
+        drawCylinderY(0.0f, -FOREARM_LEN, 0.0f, foreR, foreR, FOREARM_LEN, SKIN);
+
+        if (ts.lowerCover > 0.0f)
+        {
+            float len = FOREARM_LEN * ts.lowerCover;
+            float sr = foreR + ts.sleeveGrow;
+            drawSphere(0.0f, 0.0f, 0.0f, sr * 1.05f, sr * 1.05f, sr * 1.05f, ts.sleeve);
+            drawCylinderY(0.0f, -len, 0.0f, sr, sr, len, ts.sleeve);
+            if (ts.cuff)
+                drawCylinderY(0.0f, -FOREARM_LEN, 0.0f, sr + 0.02f, sr + 0.02f, 0.16f, ts.body);
+        }
+
+        drawHand(p.peaceHand[i]);
+    glPopMatrix();
+}
+
+// ============================================================
+// LEG: hip joint -> thigh -> knee joint -> shin -> shoe
+// ============================================================
+void drawLeg(int side, const PoseAngles& p, const BottomStyle& bs, const Shape& s)
+{
+    int i = (side < 0) ? 0 : 1;
+    float thighR = s.legR;
+    float shinR = s.legR * 0.82f;
+
+    glPushMatrix();
+        glTranslatef(side * s.legX, HIP_Y, 0.0f);                    // hip pivot
+        glRotatef(-p.hipPitch[i], 1.0f, 0.0f, 0.0f);
+
+        drawSphere(0.0f, 0.0f, 0.0f, thighR * 1.05f, thighR * 1.05f, thighR * 1.05f, SKIN);
+        drawCylinderY(0.0f, -THIGH_LEN, 0.0f, thighR, thighR, THIGH_LEN, SKIN);
+
+        if (bs.thighCover > 0.0f)
+        {
+            float len = THIGH_LEN * bs.thighCover;
+            float lr = thighR + bs.thighGrow;
+            drawCylinderY(0.0f, -len, 0.0f, lr, lr, len, bs.main);
+            if (bs.thighCover < 0.99f)       // shorts hem
+                drawCylinderY(0.0f, -len, 0.0f, lr + 0.02f, lr + 0.02f, 0.10f, bs.trim);
+            if (bs.cargoPockets)
+            {
+                drawBlock(side * (lr + 0.04f), -0.55f, 0.0f, 0.14f, 0.45f, 0.45f, bs.trim);
+                drawBlock(side * (lr + 0.04f), -0.30f, 0.0f, 0.16f, 0.08f, 0.47f, bs.main);
+            }
+        }
+
+        // Knee
+        glTranslatef(0.0f, -THIGH_LEN, 0.0f);
+        glRotatef(p.knee[i], 1.0f, 0.0f, 0.0f);
+
+        drawSphere(0.0f, 0.0f, 0.0f, shinR * 1.1f, shinR * 1.1f, shinR * 1.1f, SKIN);
+        drawCylinderY(0.0f, -SHIN_LEN, 0.0f, shinR, shinR, SHIN_LEN, SKIN);
+
+        if (bs.sockCover > 0.0f)
+        {
+            float len = SHIN_LEN * bs.sockCover;
+            drawCylinderY(0.0f, -SHIN_LEN, 0.0f, shinR + 0.03f, shinR + 0.03f, len, bs.sock);
+            drawCylinderY(0.0f, -SHIN_LEN + len - 0.10f, 0.0f,
+                          shinR + 0.04f, shinR + 0.04f, 0.07f, bs.trim);
+        }
+
+        if (bs.shinCover > 0.0f)
+        {
+            float len = SHIN_LEN * bs.shinCover;
+            float lr = shinR + bs.shinGrow;
+            drawSphere(0.0f, 0.0f, 0.0f, thighR + bs.thighGrow, thighR * 0.9f, thighR + bs.thighGrow, bs.main);
+            drawCylinderY(0.0f, -len, 0.0f, lr, lr, len, bs.main);
+            if (bs.cuff)
+                drawCylinderY(0.0f, -SHIN_LEN, 0.0f, lr + 0.02f, lr + 0.02f, 0.20f, bs.trim);
+        }
+
+        // Ankle and shoe
+        glTranslatef(0.0f, -SHIN_LEN, 0.0f);
+        drawShoe(side);
+    glPopMatrix();
+}
+
+// ============================================================
+// TORSO: body, bottoms (waist/hips/skirt) and tops
+// ============================================================
+void drawSkirt(const Shape& s, const BottomStyle& bs)
+{
+    drawTorsoBand(s, 2.35f, bs.hipTop, bs.hipGrow, bs.main);          // waistband + hips
+    drawTorsoBand(s, 2.90f, 3.02f, bs.hipGrow + 0.02f, bs.belt);
+
+    // A cone makes the skirt flare out from the waist
+    drawConeY(0.0f, 1.65f, 0.0f, 1.12f, 1.75f, bs.main, 14);
+    drawCylinderY(0.0f, 1.62f, 0.0f, 1.14f, 1.14f, 0.08f, bs.trim);   // hem
+
+    // Pleat lines: thin darker blocks tilted to match the cone slope
+    Color pleat = shade(bs.main, 0.7f);
+    for (int i = 0; i < 7; i++)
+    {
+        glPushMatrix();
+            glRotatef(i * (360.0f / 7.0f), 0.0f, 1.0f, 0.0f);
+            glTranslatef(0.0f, 2.45f, 0.62f);
+            glRotatef(-32.6f, 1.0f, 0.0f, 0.0f);
+            drawBlock(0.0f, 0.0f, 0.0f, 0.04f, 1.50f, 0.03f, pleat);
+        glPopMatrix();
+    }
+}
+
+void drawBottomTorso(const Shape& s, const BottomStyle& bs)
+{
+    if (bs.skirt)
+    {
+        drawSkirt(s, bs);
+        return;
+    }
+
+    drawTorsoBand(s, 2.35f, bs.hipTop, bs.hipGrow, bs.main);
+    drawTorsoBand(s, bs.hipTop - 0.14f, bs.hipTop, bs.hipGrow + 0.02f, bs.belt);   // belt
+
+    if (genderChoice == 0)   // belt buckle
+        drawBlock(0.0f, bs.hipTop - 0.07f, s.waistRz + bs.hipGrow + 0.03f,
+                  0.20f, 0.12f, 0.04f, rgb(0.85f, 0.75f, 0.30f));
+
+    if (bs.backPockets)
+    {
+        for (int side = -1; side <= 1; side += 2)
+            drawBlock(side * 0.28f, 2.60f, -(s.hipRz + bs.hipGrow + 0.01f),
+                      0.34f, 0.34f, 0.05f, bs.trim);
+    }
+}
+
+void drawTopTorso(const Shape& s, const TopStyle& ts)
+{
+    Color white = rgb(0.97f, 0.97f, 1.00f);
+    float fz = s.chestRz + ts.bodyGrow;      // front surface at the center
+
+    // Main layer plus a rounded shoulder cap
+    drawTorsoBand(s, ts.bodyBottom, 4.05f, ts.bodyGrow, ts.body);
+    drawSphere(0.0f, 4.05f, 0.0f, s.chestRx + ts.bodyGrow, 0.20f, s.chestRz + ts.bodyGrow, ts.body);
+    drawTorsoBand(s, ts.bodyBottom, ts.bodyBottom + 0.16f, ts.bodyGrow + 0.02f, ts.trim);   // hem
+
+    if (genderChoice == 0)
+    {
+        int style = selection[CAT_TOP];
+
+        if (style == 0)   // ----- male varsity jacket -----
+        {
+            drawCylinderY(0.0f, 4.02f, 0.0f, 0.40f, 0.40f, 0.26f, ts.trim);               // collar
+            drawBlock(0.0f, 3.25f, fz - 0.02f, 0.30f, 1.55f, 0.08f, ts.sleeve);            // opening
+            for (int i = 0; i < 4; i++)                                                    // snaps
+                drawSphere(0.0f, 3.85f - i * 0.38f, fz + 0.03f, 0.05f, 0.05f, 0.04f, ts.accent);
+            float ez = chestZ(s, -0.42f, ts.bodyGrow);
+            drawSphere(-0.42f, 3.55f, ez, 0.17f, 0.17f, 0.04f, ts.accent);                 // chest emblem
+            drawSphere(-0.42f, 3.55f, ez + 0.03f, 0.09f, 0.09f, 0.03f, ts.body);
+            drawSphere(0.0f, 3.40f, -(fz + 0.01f), 0.40f, 0.40f, 0.04f, ts.accent);        // back emblem
+            drawSphere(0.0f, 3.40f, -(fz + 0.04f), 0.26f, 0.26f, 0.03f, ts.body);
+            drawSphere(0.0f, 3.40f, -(fz + 0.07f), 0.12f, 0.12f, 0.03f, ts.accent);
+        }
+        else if (style == 1)   // ----- male school uniform -----
+        {
+            drawCylinderY(0.0f, 4.02f, 0.0f, 0.38f, 0.38f, 0.18f, white);                  // collar ring
+            for (int side = -1; side <= 1; side += 2)                                      // collar flaps
+                drawRotatedBlock(side * 0.20f, 4.08f, fz - 0.02f, 0.30f, 0.20f, 0.07f, side * -35.0f, white);
+            drawSphere(0.0f, 3.95f, fz + 0.02f, 0.11f, 0.10f, 0.06f, ts.trim);             // tie knot
+            drawBlock(0.0f, 3.45f, fz + 0.01f, 0.20f, 0.85f, 0.05f, ts.trim);              // tie
+            drawBlock(0.0f, 2.95f, fz, 0.26f, 0.22f, 0.05f, ts.trim);
+            drawBlock(0.0f, 3.45f, fz + 0.04f, 0.20f, 0.05f, 0.02f, ts.accent);            // tie stripe
+            drawSphere(0.0f, 3.05f, fz + 0.01f, 0.04f, 0.04f, 0.03f, ts.accent);           // buttons
+            drawSphere(0.0f, 2.80f, fz + 0.01f, 0.04f, 0.04f, 0.03f, ts.accent);
+            float pz = chestZ(s, -0.40f, ts.bodyGrow);
+            drawBlock(-0.40f, 3.45f, pz + 0.01f, 0.30f, 0.32f, 0.04f, rgb(0.80f, 0.85f, 0.95f)); // pocket
+        }
+        else   // ----- male campus tee -----
+        {
+            drawCylinderY(0.0f, 4.02f, 0.0f, 0.34f, 0.34f, 0.14f, ts.trim);                // neckline
+            float yz = chestZ(s, 0.0f, ts.bodyGrow);
+            drawBlock(0.0f, 3.65f, yz + 0.01f, 1.10f, 0.12f, 0.05f, ts.accent);            // stripes
+            drawBlock(0.0f, 3.42f, yz + 0.01f, 1.10f, 0.12f, 0.05f, white);
+            drawBlock(0.0f, 3.19f, yz + 0.01f, 1.10f, 0.12f, 0.05f, ts.accent);
+            drawSphere(0.0f, 3.40f, -(yz + 0.01f), 0.30f, 0.30f, 0.04f, ts.accent);        // back print
+            drawSphere(0.0f, 3.40f, -(yz + 0.04f), 0.18f, 0.18f, 0.03f, ts.trim);
+        }
+    }
+    else
+    {
+        int style = selection[CAT_TOP];
+
+        if (style == 0)   // ----- female cropped varsity -----
+        {
+            drawTorsoBand(s, 2.85f, 3.05f, 0.045f, white);                                 // shirt under the crop
+            drawCylinderY(0.0f, 4.02f, 0.0f, 0.36f, 0.36f, 0.24f, ts.trim);                // collar
+            drawBlock(0.0f, 3.55f, fz - 0.02f, 0.26f, 1.05f, 0.08f, ts.sleeve);            // opening
+            for (int i = 0; i < 3; i++)
+                drawSphere(0.0f, 3.85f - i * 0.30f, fz + 0.03f, 0.045f, 0.045f, 0.04f, ts.accent);
+            float ez = chestZ(s, -0.32f, ts.bodyGrow);
+            drawSphere(-0.32f, 3.70f, ez, 0.14f, 0.14f, 0.04f, ts.accent);                 // chest emblem
+            drawSphere(0.0f, 3.55f, -(fz + 0.01f), 0.34f, 0.34f, 0.04f, ts.accent);        // back emblem
+            drawSphere(0.0f, 3.55f, -(fz + 0.04f), 0.20f, 0.20f, 0.03f, ts.body);
+        }
+        else if (style == 1)   // ----- female school blouse -----
+        {
+            drawSphere(0.0f, 3.98f, 0.0f, s.chestRx + 0.14f, 0.11f, s.chestRz + 0.14f, ts.trim); // sailor collar
+            drawSphere(-0.20f, 3.86f, fz + 0.01f, 0.17f, 0.12f, 0.07f, ts.accent);               // ribbon loops
+            drawSphere(0.20f, 3.86f, fz + 0.01f, 0.17f, 0.12f, 0.07f, ts.accent);
+            drawSphere(0.0f, 3.86f, fz + 0.04f, 0.08f, 0.08f, 0.06f, shade(ts.accent, 0.8f));    // knot
+            drawRotatedBlock(-0.07f, 3.58f, fz + 0.02f, 0.09f, 0.45f, 0.04f, 10.0f, ts.accent);  // ribbon tails
+            drawRotatedBlock(0.07f, 3.58f, fz + 0.02f, 0.09f, 0.45f, 0.04f, -10.0f, ts.accent);
+            drawSphere(0.0f, 3.30f, fz + 0.01f, 0.04f, 0.04f, 0.03f, ts.trim);                   // buttons
+            drawSphere(0.0f, 3.05f, fz + 0.01f, 0.04f, 0.04f, 0.03f, ts.trim);
+        }
+        else   // ----- female oversized tee -----
+        {
+            drawCylinderY(0.0f, 4.02f, 0.0f, 0.34f, 0.34f, 0.14f, ts.trim);                // neckline
+            float yz = chestZ(s, 0.0f, ts.bodyGrow);
+            drawSphere(0.0f, 3.45f, yz + 0.01f, 0.30f, 0.30f, 0.04f, ts.accent);           // graphic
+            drawSphere(0.0f, 3.45f, yz + 0.04f, 0.16f, 0.16f, 0.03f, ts.trim);
+            drawSphere(0.0f, 3.50f, -(yz + 0.01f), 0.26f, 0.26f, 0.04f, ts.accent);        // back print
+        }
+    }
+}
+
+void drawBackpack(const Shape& s)
+{
+    Color orange = rgb(0.92f, 0.46f, 0.10f);
+    Color orangeDark = rgb(0.62f, 0.28f, 0.06f);
+    Color strap = rgb(0.20f, 0.20f, 0.24f);
+
+    drawBlock(0.0f, 3.15f, -0.95f, 1.15f, 1.50f, 0.62f, orange);                 // main bag
+    drawSphere(0.0f, 3.90f, -0.95f, 0.58f, 0.22f, 0.32f, orangeDark);             // rounded top
+    drawBlock(0.0f, 2.70f, -1.33f, 0.85f, 0.60f, 0.16f, orangeDark);              // front pocket
+    drawBlock(0.0f, 2.97f, -1.42f, 0.70f, 0.04f, 0.02f, rgb(0.9f, 0.9f, 0.9f));   // zipper
+    drawCylinderY(-0.66f, 2.45f, -0.95f, 0.14f, 0.14f, 0.7f, orangeDark);         // side bottle pockets
+    drawCylinderY(0.66f, 2.45f, -0.95f, 0.14f, 0.14f, 0.7f, orangeDark);
+
+    float sx = s.chestRx * 0.55f;
     for (int side = -1; side <= 1; side += 2)
     {
-        float ex = side * 0.27f;
-        drawBlock(ex, 4.36f, 0.55f, 0.24f, 0.20f, 0.04f, rgb(0.97f, 0.97f, 0.97f)); // eye white
-        drawBlock(ex, 4.35f, 0.565f, 0.12f, 0.16f, 0.03f, dark);                    // pupil
-        drawBlock(ex + side * 0.03f, 4.40f, 0.58f, 0.04f, 0.04f, 0.01f,
-                  rgb(1.0f, 1.0f, 1.0f));                                           // sparkle
+        drawBlock(side * sx, 4.20f, -0.20f, 0.18f, 0.07f, 1.45f, strap);          // over the shoulder
+        drawBlock(side * sx, 3.45f, 0.64f, 0.18f, 1.40f, 0.06f, strap);           // down the chest
+    }
+}
+
+// ============================================================
+// HEAD: head, face, hair and head accessories
+// Everything inside is drawn around the head center (0,0,0).
+// ============================================================
+void drawFace(const Shape& s)
+{
+    bool female = (genderChoice == 1);
+    float hr = s.headR;
+    Color dark = rgb(0.05f, 0.04f, 0.04f);
+    Color browColor = rgb(0.10f, 0.06f, 0.04f);
+    Color lips = rgb(0.62f, 0.22f, 0.22f);
+
+    // Head and ears
+    drawSphere(0.0f, 0.0f, 0.0f, hr, hr * 1.08f, hr * 0.95f, SKIN);
+    drawSphere(-(hr + 0.02f), 0.0f, 0.0f, 0.07f, 0.13f, 0.10f, SKIN_SHADE);
+    drawSphere((hr + 0.02f), 0.0f, 0.0f, 0.07f, 0.13f, 0.10f, SKIN_SHADE);
+
+    // Face details are all on the FRONT (+Z) of the head
+    for (int side = -1; side <= 1; side += 2)
+    {
+        float ex = side * 0.24f;
+        drawSphere(ex, 0.07f, 0.50f, 0.12f, 0.14f, 0.08f, rgb(0.97f, 0.97f, 0.97f));   // eye white
+        drawSphere(ex, 0.07f, 0.55f, 0.065f, 0.09f, 0.05f, dark);                      // pupil
+        drawSphere(ex + side * 0.025f, 0.11f, 0.59f, 0.025f, 0.025f, 0.02f,
+                   rgb(1.0f, 1.0f, 1.0f));                                              // sparkle
 
         if (female)
         {
-            drawBlock(ex, 4.54f, 0.55f, 0.26f, 0.06f, 0.04f, browColor);            // thin brow
-            drawBlock(ex, 4.46f, 0.56f, 0.30f, 0.04f, 0.04f, dark);                 // lashes
+            drawRotatedBlock(ex, 0.27f, 0.47f, 0.24f, 0.04f, 0.06f, side * -8.0f, browColor);  // thin brow
+            drawRotatedBlock(ex, 0.19f, 0.50f, 0.28f, 0.04f, 0.05f, side * -6.0f, dark);       // lashes
         }
         else
         {
-            drawBlock(ex, 4.54f, 0.55f, 0.30f, 0.09f, 0.04f, browColor);            // thick brow
+            drawRotatedBlock(ex, 0.27f, 0.47f, 0.28f, 0.08f, 0.06f, side * 6.0f, browColor);   // thick brow
         }
     }
 
-    drawBlock(0.0f, 4.12f, 0.59f, 0.16f, 0.20f, 0.12f, SKIN_SHADE);                 // nose
-
-    Color lips = rgb(0.62f, 0.22f, 0.22f);
-    drawBlock(0.0f, 3.89f, 0.55f, 0.34f, 0.06f, 0.04f, lips);                       // mouth
-    drawBlock(-0.20f, 3.93f, 0.55f, 0.06f, 0.06f, 0.04f, lips);                     // smile
-    drawBlock(0.20f, 3.93f, 0.55f, 0.06f, 0.06f, 0.04f, lips);
+    drawSphere(0.0f, -0.06f, 0.60f, 0.07f, 0.09f, 0.08f, SKIN_SHADE);                  // nose
+    drawSphere(0.0f, -0.30f, 0.52f, 0.12f, 0.025f, 0.04f, lips);                       // mouth
+    drawSphere(-0.14f, -0.27f, 0.51f, 0.035f, 0.035f, 0.04f, lips);                    // smile corners
+    drawSphere(0.14f, -0.27f, 0.51f, 0.035f, 0.035f, 0.04f, lips);
 
     if (female)
     {
         Color blush = rgb(0.88f, 0.45f, 0.42f);
-        drawBlock(-0.40f, 4.00f, 0.55f, 0.16f, 0.08f, 0.03f, blush);
-        drawBlock(0.40f, 4.00f, 0.55f, 0.16f, 0.08f, 0.03f, blush);
+        drawSphere(-0.38f, -0.17f, 0.42f, 0.10f, 0.06f, 0.04f, blush);
+        drawSphere(0.38f, -0.17f, 0.42f, 0.10f, 0.06f, 0.04f, blush);
     }
 }
 
-void drawHair()
+// Rotated oval used for swept hair pieces
+void drawTiltedHair(float x, float y, float z, float rx, float ry, float rz,
+                    float angleZ, const Color& c)
+{
+    glPushMatrix();
+        glTranslatef(x, y, z);
+        glRotatef(angleZ, 0.0f, 0.0f, 1.0f);
+        drawSphere(0.0f, 0.0f, 0.0f, rx, ry, rz, c);
+    glPopMatrix();
+}
+
+// One tilted cone used for spiky hair
+void drawSpike(float yaw, float ringRadius, float tilt, float baseY, float radius, float height,
+               const Color& c)
+{
+    glPushMatrix();
+        glTranslatef(0.0f, baseY, -0.05f);
+        glRotatef(yaw, 0.0f, 1.0f, 0.0f);
+        glTranslatef(0.0f, 0.0f, ringRadius);
+        glRotatef(tilt, 1.0f, 0.0f, 0.0f);
+        drawConeY(0.0f, 0.0f, 0.0f, radius, height, c, 6);
+    glPopMatrix();
+}
+
+void drawHair(const Shape& s)
 {
     int style = selection[CAT_HAIR];
     bool capOn = (selection[CAT_ACCESSORY] == ACC_CAP);
     bool female = (genderChoice == 1);
+    float hr = s.headR;
 
     Color hair;
-    if (style == 0)      hair = rgb(0.20f, 0.10f, 0.05f);
-    else if (style == 1) hair = rgb(0.08f, 0.06f, 0.05f);
-    else                 hair = rgb(0.32f, 0.17f, 0.06f);
+    if (!female)
+    {
+        if (style == 0)      hair = rgb(0.20f, 0.10f, 0.05f);
+        else if (style == 1) hair = rgb(0.08f, 0.06f, 0.05f);
+        else                 hair = rgb(0.32f, 0.17f, 0.06f);
+    }
+    else
+    {
+        if (style == 0)      hair = rgb(0.12f, 0.07f, 0.06f);
+        else if (style == 1) hair = rgb(0.42f, 0.20f, 0.08f);
+        else                 hair = rgb(0.20f, 0.10f, 0.07f);
+    }
     Color light = shade(hair, 1.6f);
+    Color tie = rgb(0.95f, 0.40f, 0.55f);
 
-    // Back and sides are shared by all styles (ears stay visible)
-    drawBlock(0.0f, 4.35f, -0.60f, 1.34f, 0.95f, 0.22f, hair);
-    drawBlock(-0.64f, 4.62f, 0.0f, 0.14f, 0.40f, 1.04f, hair);
-    drawBlock(0.64f, 4.62f, 0.0f, 0.14f, 0.40f, 1.04f, hair);
+    // Hair cap: sits back and up from the face, which leaves a natural hairline
+    drawSphere(0.0f, 0.13f, -0.10f, hr + 0.05f, hr, hr + 0.05f, hair);
 
-    // Base-specific length
-    if (female)
+    if (!female)
     {
-        if (style == 2)   // ponytail for the spiky style
+        drawSphere(-(hr + 0.01f), -0.02f, 0.12f, 0.06f, 0.20f, 0.14f, hair);        // sideburns
+        drawSphere((hr + 0.01f), -0.02f, 0.12f, 0.06f, 0.20f, 0.14f, hair);
+
+        if (capOn)
+            return;
+
+        if (style == 0)       // CLASSIC: rounded top and short fringe
         {
-            drawBlock(0.0f, 4.55f, -0.80f, 0.32f, 0.80f, 0.32f, hair);
-            drawBlock(0.0f, 4.90f, -0.78f, 0.36f, 0.10f, 0.36f, rgb(0.95f, 0.35f, 0.45f));
+            drawSphere(0.0f, 0.58f, -0.05f, 0.50f, 0.22f, 0.50f, hair);
+            drawSphere(0.0f, 0.42f, 0.42f, 0.46f, 0.12f, 0.16f, hair);
+            drawSphere(-0.18f, 0.74f, 0.0f, 0.28f, 0.06f, 0.30f, light);
         }
-        else              // long hair down the back
+        else if (style == 1)  // SIDE PART: swept fringe over one side
         {
-            drawBlock(0.0f, 3.90f, -0.66f, 1.34f, 1.40f, 0.20f, hair);
+            drawSphere(-0.08f, 0.56f, -0.02f, 0.55f, 0.20f, 0.52f, hair);
+            drawTiltedHair(-0.16f, 0.42f, 0.40f, 0.42f, 0.13f, 0.17f, -16.0f, hair);
+            drawTiltedHair(0.30f, 0.44f, 0.38f, 0.20f, 0.07f, 0.14f, 10.0f, hair);
+            drawBlock(0.20f, 0.77f, 0.05f, 0.03f, 0.03f, 0.70f, light);                 // part line
         }
-    }
-
-    // The cap covers the top of the hair, so skip the top pieces
-    if (capOn)
-        return;
-
-    if (style == 0)       // CLASSIC: rounded top, short fringe
-    {
-        drawBlock(0.0f, 4.88f, 0.0f, 1.34f, 0.30f, 1.22f, hair);
-        drawBlock(0.0f, 4.72f, 0.62f, 1.34f, 0.20f, 0.14f, hair);
-        drawBlock(-0.25f, 5.05f, 0.10f, 0.60f, 0.06f, 0.70f, light);
-    }
-    else if (style == 1)  // SIDE PART: swept fringe, longer left side
-    {
-        drawBlock(-0.05f, 4.88f, 0.0f, 1.38f, 0.30f, 1.22f, hair);
-        drawBlock(-0.25f, 4.70f, 0.62f, 0.90f, 0.24f, 0.14f, hair);
-        drawBlock(0.40f, 4.77f, 0.62f, 0.50f, 0.10f, 0.14f, hair);
-        drawBlock(0.12f, 5.04f, 0.10f, 0.05f, 0.04f, 1.00f, light);
-        drawBlock(-0.68f, 4.55f, 0.05f, 0.14f, 0.60f, 0.95f, hair);
-    }
-    else                  // SPIKY: tilted spikes with lighter tips
-    {
-        drawBlock(0.0f, 4.84f, 0.0f, 1.34f, 0.20f, 1.22f, hair);
-        for (int i = -2; i <= 2; i++)
+        else                  // SPIKY: a ring of cones around a tall center spike
         {
-            float h = 0.62f - fabs((float)i) * 0.10f;
-            float angle = -14.0f * i;
-            float x = 0.27f * i;
-            float cy = 4.90f + h * 0.5f;
-            float rad = angle * PI / 180.0f;
-
-            drawRotatedBlock(x, cy, 0.0f, 0.26f, h, 0.80f, angle, hair);
-            drawRotatedBlock(x - sinf(rad) * (h * 0.5f),
-                             cy + cosf(rad) * (h * 0.5f), 0.0f,
-                             0.22f, 0.14f, 0.72f, angle, light);
-        }
-        drawBlock(-0.40f, 4.74f, 0.62f, 0.30f, 0.22f, 0.14f, hair);
-        drawBlock(0.00f, 4.76f, 0.62f, 0.30f, 0.28f, 0.14f, hair);
-        drawBlock(0.40f, 4.74f, 0.62f, 0.30f, 0.22f, 0.14f, hair);
-    }
-}
-
-// Sleeve helper: wraps the arm between two heights
-void drawSleeve(float bodyWidth, int side, float yBottom, float yTop,
-                float grow, const Color& c)
-{
-    float armX = bodyWidth * 0.5f + 0.20f;
-    drawBlock(side * armX, (yBottom + yTop) * 0.5f, 0.0f,
-              ARM_W + grow, yTop - yBottom, ARM_D + grow, c);
-}
-
-void drawTop(float bodyWidth)
-{
-    int style = selection[CAT_TOP];
-
-    if (style == 0)   // VARSITY jacket
-    {
-        Color maroon = rgb(0.52f, 0.06f, 0.13f);
-        Color dark = rgb(0.34f, 0.04f, 0.09f);
-        Color cream = rgb(0.90f, 0.84f, 0.72f);
-        Color gold = rgb(0.95f, 0.78f, 0.20f);
-
-        drawBlock(0.0f, 2.70f, 0.0f, bodyWidth, 1.60f, 0.86f, maroon);        // jacket body
-        drawBlock(0.0f, 1.97f, 0.0f, bodyWidth + 0.04f, 0.14f, 0.90f, dark);  // bottom band
-        drawBlock(0.0f, 2.75f, 0.44f, 0.44f, 1.40f, 0.06f, rgb(0.92f, 0.92f, 0.88f)); // shirt under opening
-        drawBlock(-0.25f, 2.75f, 0.455f, 0.06f, 1.45f, 0.05f, dark);          // opening edges
-        drawBlock(0.25f, 2.75f, 0.455f, 0.06f, 1.45f, 0.05f, dark);
-        drawBlock(0.0f, 3.56f, 0.0f, 0.86f, 0.22f, 0.86f, dark);              // collar
-
-        for (int i = 0; i < 4; i++)                                           // gold snaps
-            drawBlock(-0.36f, 3.20f - i * 0.40f, 0.45f, 0.08f, 0.08f, 0.05f, gold);
-
-        // chest emblem and back emblem
-        drawBlock(-0.56f, 3.05f, 0.44f, 0.30f, 0.30f, 0.05f, gold);
-        drawBlock(-0.56f, 3.05f, 0.45f, 0.14f, 0.14f, 0.05f, maroon);
-        drawBlock(0.0f, 2.90f, -0.44f, 0.70f, 0.70f, 0.04f, gold);
-        drawBlock(0.0f, 2.90f, -0.45f, 0.50f, 0.50f, 0.04f, maroon);
-        drawBlock(0.0f, 2.90f, -0.47f, 0.22f, 0.22f, 0.04f, gold);
-
-        for (int side = -1; side <= 1; side += 2)
-        {
-            drawSleeve(bodyWidth, side, 1.98f, 3.52f, 0.05f, cream);          // long sleeves
-            drawSleeve(bodyWidth, side, 3.00f, 3.08f, 0.08f, maroon);         // stripes
-            drawSleeve(bodyWidth, side, 2.82f, 2.90f, 0.08f, maroon);
-            drawSleeve(bodyWidth, side, 1.98f, 2.12f, 0.08f, dark);           // cuff
+            for (int i = 0; i < 6; i++)
+                drawSpike(20.0f + i * 60.0f, 0.34f, 30.0f, 0.58f, 0.20f, 0.62f, hair);
+            drawSpike(0.0f, 0.0f, 0.0f, 0.66f, 0.22f, 0.80f, light);
+            drawSpike(0.0f, 0.40f, 55.0f, 0.46f, 0.18f, 0.50f, hair);              // front spike
         }
     }
-    else if (style == 1)   // SCHOOL uniform
+    else
     {
-        Color shirt = rgb(0.93f, 0.94f, 0.97f);
-        Color navy = rgb(0.08f, 0.16f, 0.45f);
-        Color gray = rgb(0.72f, 0.75f, 0.82f);
-
-        drawBlock(0.0f, 2.70f, 0.0f, bodyWidth, 1.60f, 0.86f, shirt);         // shirt
-        drawBlock(0.0f, 3.56f, 0.0f, 0.70f, 0.20f, 0.70f, rgb(0.98f, 0.98f, 1.0f)); // collar ring
-        drawBlock(-0.20f, 3.45f, 0.40f, 0.28f, 0.22f, 0.12f, rgb(0.98f, 0.98f, 1.0f)); // collar flaps
-        drawBlock(0.20f, 3.45f, 0.40f, 0.28f, 0.22f, 0.12f, rgb(0.98f, 0.98f, 1.0f));
-
-        drawBlock(0.0f, 3.38f, 0.46f, 0.20f, 0.16f, 0.08f, navy);             // tie knot
-        drawBlock(0.0f, 2.95f, 0.45f, 0.17f, 0.72f, 0.06f, navy);             // tie body
-        drawBlock(0.0f, 2.50f, 0.45f, 0.22f, 0.20f, 0.06f, navy);             // tie tip
-        drawBlock(0.0f, 2.95f, 0.49f, 0.17f, 0.06f, 0.02f, gray);             // tie stripe
-
-        drawBlock(0.0f, 2.20f, 0.44f, 0.07f, 0.07f, 0.05f, gray);             // buttons
-        drawBlock(0.0f, 2.00f, 0.44f, 0.07f, 0.07f, 0.05f, gray);
-
-        drawBlock(-0.35f, 2.95f, 0.44f, 0.28f, 0.30f, 0.04f, rgb(0.80f, 0.85f, 0.95f)); // pocket
-        drawBlock(-0.35f, 3.08f, 0.46f, 0.28f, 0.04f, 0.02f, gray);
-
-        for (int side = -1; side <= 1; side += 2)
+        if (style == 0)       // LONG HAIR: curtain behind and locks beside the face
         {
-            drawSleeve(bodyWidth, side, 2.62f, 3.52f, 0.05f, shirt);          // short sleeves
-            drawSleeve(bodyWidth, side, 2.62f, 2.70f, 0.08f, navy);           // sleeve trim
+            drawSphere(0.0f, -0.60f, -0.38f, 0.62f, 1.15f, 0.38f, hair);
+            drawSphere(-(hr + 0.02f), -0.30f, 0.05f, 0.12f, 0.58f, 0.24f, hair);
+            drawSphere((hr + 0.02f), -0.30f, 0.05f, 0.12f, 0.58f, 0.24f, hair);
         }
-    }
-    else   // TAMBAY casual tee
-    {
-        Color teal = rgb(0.12f, 0.55f, 0.45f);
-        Color tealDark = rgb(0.08f, 0.36f, 0.30f);
-        Color yellow = rgb(0.98f, 0.82f, 0.25f);
-
-        drawBlock(0.0f, 2.70f, 0.0f, bodyWidth, 1.60f, 0.86f, teal);          // tee
-        drawBlock(0.0f, 1.97f, 0.0f, bodyWidth + 0.02f, 0.14f, 0.88f, tealDark); // hem
-        drawBlock(0.0f, 3.54f, 0.0f, 0.64f, 0.14f, 0.60f, tealDark);          // round neckline
-
-        drawBlock(0.0f, 3.10f, 0.44f, 0.80f, 0.10f, 0.04f, yellow);           // chest stripes
-        drawBlock(0.0f, 2.90f, 0.44f, 0.80f, 0.10f, 0.04f, rgb(1.0f, 1.0f, 1.0f));
-        drawBlock(0.0f, 2.70f, 0.44f, 0.80f, 0.10f, 0.04f, yellow);
-
-        drawBlock(0.0f, 3.00f, -0.44f, 0.60f, 0.50f, 0.04f, yellow);          // back print
-        drawBlock(0.0f, 3.00f, -0.45f, 0.40f, 0.30f, 0.04f, tealDark);
-
-        for (int side = -1; side <= 1; side += 2)
+        else if (style == 1)  // PONYTAIL: tie and tail behind the head
         {
-            drawSleeve(bodyWidth, side, 2.75f, 3.52f, 0.05f, teal);           // short sleeves
-            drawSleeve(bodyWidth, side, 2.75f, 2.82f, 0.08f, tealDark);
+            drawSphere(0.0f, 0.46f, -0.62f, 0.11f, 0.11f, 0.11f, tie);
+            drawSphere(0.0f, 0.26f, -0.80f, 0.22f, 0.26f, 0.22f, hair);
+            drawSphere(0.0f, -0.10f, -0.86f, 0.24f, 0.30f, 0.22f, hair);
+            drawSphere(0.0f, -0.48f, -0.82f, 0.20f, 0.30f, 0.18f, hair);
+            drawSphere(0.0f, -0.80f, -0.74f, 0.14f, 0.24f, 0.14f, hair);
+        }
+        else                  // TWIN BUNS: short back hair and two buns
+        {
+            drawSphere(0.0f, -0.25f, -0.45f, 0.55f, 0.45f, 0.25f, hair);
+            if (!capOn)
+            {
+                for (int side = -1; side <= 1; side += 2)
+                {
+                    drawSphere(side * 0.50f, 0.62f, -0.10f, 0.30f, 0.30f, 0.30f, hair);
+                    drawSphere(side * 0.42f, 0.48f, -0.06f, 0.09f, 0.09f, 0.09f, tie);
+                }
+            }
+        }
+
+        if (!capOn)   // bangs for the female hairstyles
+        {
+            drawSphere(0.0f, 0.40f, 0.42f, 0.50f, 0.14f, 0.18f, hair);
+            drawTiltedHair(-0.36f, 0.30f, 0.44f, 0.16f, 0.10f, 0.12f, 20.0f, hair);
+            drawTiltedHair(0.36f, 0.30f, 0.44f, 0.16f, 0.10f, 0.12f, -20.0f, hair);
         }
     }
 }
 
-void drawBottom()
+void drawHeadAccessory(const Shape& s)
 {
-    int style = selection[CAT_BOTTOM];
-
-    if (style == 0)   // CARGO pants
-    {
-        Color olive = rgb(0.34f, 0.38f, 0.22f);
-        Color oliveDark = rgb(0.24f, 0.27f, 0.15f);
-
-        drawBlock(0.0f, 1.85f, 0.0f, 1.52f, 0.30f, 0.80f, olive);             // hips
-        drawBlock(0.0f, 1.86f, 0.0f, 1.58f, 0.16f, 0.92f, rgb(0.15f, 0.12f, 0.10f)); // belt
-        drawBlock(0.0f, 1.86f, 0.47f, 0.18f, 0.12f, 0.03f, rgb(0.85f, 0.75f, 0.30f)); // buckle
-
-        for (int side = -1; side <= 1; side += 2)
-        {
-            float lx = side * 0.38f;
-            drawBlock(lx, 1.175f, 0.0f, 0.74f, 1.55f, 0.76f, olive);          // leg
-            drawBlock(lx, 0.50f, 0.0f, 0.78f, 0.20f, 0.80f, oliveDark);       // cuff
-            drawBlock(side * 0.80f, 1.25f, 0.0f, 0.10f, 0.50f, 0.50f, shade(olive, 0.85f)); // cargo pocket
-            drawBlock(side * 0.80f, 1.52f, 0.0f, 0.12f, 0.10f, 0.52f, oliveDark);           // flap
-            drawBlock(lx, 1.60f, -0.39f, 0.30f, 0.28f, 0.04f, oliveDark);     // back pocket
-        }
-    }
-    else if (style == 1)   // JEANS
-    {
-        Color denim = rgb(0.13f, 0.28f, 0.55f);
-        Color denimLight = rgb(0.25f, 0.45f, 0.75f);
-
-        drawBlock(0.0f, 1.85f, 0.0f, 1.52f, 0.30f, 0.80f, denim);             // hips
-        drawBlock(0.0f, 1.86f, 0.0f, 1.58f, 0.14f, 0.92f, rgb(0.30f, 0.18f, 0.09f)); // brown belt
-        drawBlock(0.0f, 1.86f, 0.47f, 0.14f, 0.10f, 0.03f, rgb(0.85f, 0.75f, 0.30f));
-
-        for (int side = -1; side <= 1; side += 2)
-        {
-            float lx = side * 0.38f;
-            drawBlock(lx, 1.175f, 0.0f, 0.74f, 1.55f, 0.76f, denim);          // leg
-            drawBlock(lx, 0.50f, 0.0f, 0.78f, 0.18f, 0.80f, denimLight);      // rolled cuff
-            drawBlock(side * 0.765f, 1.18f, 0.0f, 0.03f, 1.40f, 0.06f, denimLight); // side seam
-            drawBlock(lx, 1.68f, 0.385f, 0.34f, 0.05f, 0.02f, denimLight);    // pocket stitch
-            drawBlock(lx, 1.05f, 0.385f, 0.28f, 0.18f, 0.02f, denimLight);    // knee fade
-            drawBlock(lx, 1.55f, -0.385f, 0.34f, 0.30f, 0.02f, denimLight);   // back pocket
-        }
-    }
-    else   // SHORTS
-    {
-        Color khaki = rgb(0.78f, 0.66f, 0.45f);
-        Color khakiDark = rgb(0.60f, 0.50f, 0.32f);
-
-        drawBlock(0.0f, 1.85f, 0.0f, 1.52f, 0.30f, 0.80f, khaki);             // hips
-        drawBlock(0.0f, 1.86f, 0.0f, 1.58f, 0.18f, 0.92f, rgb(0.30f, 0.30f, 0.38f)); // waistband
-        drawBlock(-0.10f, 1.66f, 0.47f, 0.05f, 0.26f, 0.03f, rgb(1.0f, 1.0f, 1.0f));  // drawstrings
-        drawBlock(0.10f, 1.66f, 0.47f, 0.05f, 0.26f, 0.03f, rgb(1.0f, 1.0f, 1.0f));
-
-        for (int side = -1; side <= 1; side += 2)
-        {
-            float lx = side * 0.38f;
-            drawBlock(lx, 0.75f, 0.0f, 0.66f, 0.70f, 0.66f, SKIN);            // bare legs
-            drawBlock(lx, 1.475f, 0.0f, 0.78f, 0.95f, 0.80f, khaki);          // shorts
-            drawBlock(lx, 1.06f, 0.0f, 0.80f, 0.12f, 0.82f, khakiDark);       // hem
-            drawBlock(lx, 1.55f, -0.41f, 0.30f, 0.30f, 0.04f, khakiDark);     // back pocket
-            drawBlock(lx, 0.54f, 0.0f, 0.68f, 0.28f, 0.68f, rgb(0.95f, 0.95f, 0.95f)); // socks
-            drawBlock(lx, 0.66f, 0.0f, 0.70f, 0.05f, 0.70f, rgb(0.90f, 0.20f, 0.20f)); // sock stripe
-        }
-    }
-}
-
-void drawShoes()
-{
-    int style = selection[CAT_SHOES];
-
-    for (int side = -1; side <= 1; side += 2)
-    {
-        float x = side * 0.38f;
-
-        if (style == 0)   // SNEAKERS
-        {
-            drawBlock(x, 0.06f, 0.15f, 0.80f, 0.12f, 1.14f, rgb(0.75f, 0.77f, 0.82f)); // sole
-            drawBlock(x, 0.26f, 0.15f, 0.76f, 0.28f, 1.10f, rgb(0.93f, 0.93f, 0.95f)); // upper
-            drawBlock(x, 0.25f, 0.62f, 0.78f, 0.26f, 0.20f, rgb(0.82f, 0.84f, 0.90f)); // toe cap
-            drawBlock(x, 0.27f, -0.42f, 0.50f, 0.22f, 0.05f, rgb(0.80f, 0.10f, 0.15f)); // heel tab
-            for (int i = 0; i < 3; i++)                                                 // laces
-                drawBlock(x, 0.405f, 0.10f + i * 0.14f, 0.50f, 0.03f, 0.07f,
-                          rgb(0.45f, 0.55f, 0.75f));
-        }
-        else if (style == 1)   // RUNNERS
-        {
-            drawBlock(x, 0.08f, 0.15f, 0.80f, 0.16f, 1.14f, rgb(0.97f, 0.97f, 0.97f)); // thick sole
-            drawBlock(x, 0.29f, 0.15f, 0.76f, 0.26f, 1.10f, rgb(0.08f, 0.70f, 0.82f)); // upper
-            drawBlock(x, 0.22f, 0.68f, 0.78f, 0.12f, 0.12f, rgb(0.97f, 0.97f, 0.97f)); // toe bumper
-            drawBlock(x + side * 0.395f, 0.29f, 0.10f, 0.04f, 0.10f, 0.55f,
-                      rgb(1.00f, 0.55f, 0.10f));                                        // side stripe
-            drawBlock(x, 0.44f, 0.10f, 0.30f, 0.06f, 0.30f, rgb(0.98f, 0.85f, 0.25f)); // tongue
-        }
-        else   // DARK SHOES
-        {
-            drawBlock(x, 0.05f, 0.15f, 0.80f, 0.10f, 1.14f, rgb(0.22f, 0.13f, 0.08f)); // sole
-            drawBlock(x, 0.27f, 0.15f, 0.76f, 0.34f, 1.10f, rgb(0.07f, 0.07f, 0.09f)); // upper
-            drawBlock(x, 0.45f, 0.55f, 0.50f, 0.04f, 0.20f, rgb(0.35f, 0.35f, 0.40f)); // shine
-            drawBlock(x, 0.45f, 0.05f, 0.40f, 0.03f, 0.05f, rgb(0.40f, 0.40f, 0.45f)); // laces
-            drawBlock(x, 0.45f, 0.20f, 0.40f, 0.03f, 0.05f, rgb(0.40f, 0.40f, 0.45f));
-        }
-    }
-}
-
-void drawAccessory(float bodyWidth)
-{
-    (void)bodyWidth;
     int acc = selection[CAT_ACCESSORY];
+    float hr = s.headR;
 
     if (acc == ACC_GLASSES)
     {
@@ -349,60 +886,86 @@ void drawAccessory(float bodyWidth)
 
         for (int side = -1; side <= 1; side += 2)
         {
-            float cx = side * 0.27f;
-            drawBlock(cx, 4.52f, 0.60f, 0.46f, 0.05f, 0.05f, frame);    // top bar
-            drawBlock(cx, 4.22f, 0.60f, 0.46f, 0.05f, 0.05f, frame);    // bottom bar
-            drawBlock(cx - 0.21f, 4.37f, 0.60f, 0.05f, 0.30f, 0.05f, frame);
-            drawBlock(cx + 0.21f, 4.37f, 0.60f, 0.05f, 0.30f, 0.05f, frame);
-            drawBlock(side * 0.62f, 4.40f, 0.25f, 0.04f, 0.05f, 0.70f, frame); // temple arm
+            glPushMatrix();
+                glTranslatef(side * 0.24f, 0.07f, 0.57f);
+                glColor3f(frame.r, frame.g, frame.b);
+                glutSolidTorus(0.025, 0.17, 6, 14);          // round lens frame
+            glPopMatrix();
+            drawBlock(side * 0.50f, 0.10f, 0.33f, 0.04f, 0.04f, 0.56f, frame);   // temple arm
         }
-        drawBlock(0.0f, 4.45f, 0.60f, 0.12f, 0.05f, 0.05f, frame);      // bridge
+        drawBlock(0.0f, 0.10f, 0.57f, 0.14f, 0.04f, 0.04f, frame);               // bridge
     }
     else if (acc == ACC_CAP)
     {
         Color navy = rgb(0.12f, 0.18f, 0.45f);
         Color navyDark = rgb(0.08f, 0.12f, 0.32f);
 
-        drawBlock(0.0f, 4.94f, 0.0f, 1.46f, 0.34f, 1.44f, navy);        // dome
-        drawBlock(0.0f, 5.15f, 0.0f, 1.20f, 0.16f, 1.20f, navy);        // crown
-        drawBlock(0.0f, 5.28f, 0.0f, 0.16f, 0.08f, 0.16f, navyDark);    // button
-        drawBlock(0.0f, 4.78f, 0.0f, 1.48f, 0.05f, 1.46f, navyDark);    // band
-        drawBlock(0.0f, 4.80f, 1.02f, 1.24f, 0.07f, 0.60f, navyDark);   // brim
-        drawBlock(0.0f, 4.98f, 0.73f, 0.30f, 0.20f, 0.04f, rgb(0.98f, 0.82f, 0.25f)); // logo
-    }
-    else if (acc == ACC_BACKPACK)
-    {
-        Color orange = rgb(0.92f, 0.46f, 0.10f);
-        Color orangeDark = rgb(0.62f, 0.28f, 0.06f);
-        Color strap = rgb(0.20f, 0.20f, 0.24f);
-
-        drawBlock(0.0f, 2.75f, -0.66f, 1.10f, 1.50f, 0.52f, orange);            // main bag
-        drawBlock(0.0f, 3.50f, -0.66f, 1.14f, 0.22f, 0.56f, orangeDark);        // top flap
-        drawBlock(0.0f, 2.30f, -0.95f, 0.80f, 0.55f, 0.12f, orangeDark);        // front pocket
-        drawBlock(0.0f, 2.30f, -1.02f, 0.70f, 0.04f, 0.02f, rgb(0.90f, 0.90f, 0.90f)); // zipper
-        drawBlock(-0.60f, 2.20f, -0.66f, 0.10f, 0.60f, 0.35f, orangeDark);      // side pockets
-        drawBlock(0.60f, 2.20f, -0.66f, 0.10f, 0.60f, 0.35f, orangeDark);
-
-        for (int side = -1; side <= 1; side += 2)
-        {
-            drawBlock(side * 0.62f, 3.53f, -0.05f, 0.16f, 0.08f, 0.95f, strap); // over shoulder
-            drawBlock(side * 0.62f, 2.75f, 0.46f, 0.16f, 1.50f, 0.07f, strap);  // down the chest
-        }
+        drawSphere(0.0f, 0.55f, -0.03f, hr + 0.04f, 0.38f, hr + 0.06f, navy);              // dome
+        drawCylinderY(0.0f, 0.34f, -0.02f, hr + 0.07f, hr + 0.08f, 0.22f, navy);           // band
+        drawBlock(0.0f, 0.36f, 0.78f, 0.92f, 0.06f, 0.55f, navyDark);                      // brim
+        drawSphere(0.0f, 0.88f, -0.03f, 0.07f, 0.06f, 0.07f, navyDark);                    // top button
+        drawSphere(0.0f, 0.52f, hr + 0.07f, 0.10f, 0.08f, 0.03f, rgb(0.98f, 0.82f, 0.25f)); // logo
     }
 }
 
+void drawHeadGroup(const Shape& s, const PoseAngles& p)
+{
+    glPushMatrix();
+        glTranslatef(0.0f, NECK_Y, 0.0f);               // turn the head around the neck
+        glRotatef(p.headYaw, 0.0f, 1.0f, 0.0f);
+        glRotatef(p.headTilt, 0.0f, 0.0f, 1.0f);
+        glTranslatef(0.0f, HEAD_Y - NECK_Y, 0.0f);
+
+        drawFace(s);
+        drawHair(s);
+        drawHeadAccessory(s);
+    glPopMatrix();
+}
+
+}   // end of private helpers
+
+// ============================================================
+// PUBLIC: draw the whole character
+// ============================================================
 void drawCharacter()
 {
-    // Base choice changes the body proportions
-    float bodyWidth = (genderChoice == 0) ? 1.70f : 1.50f;
+    Shape s = getShape();
+    TopStyle ts = getTopStyle();
+    BottomStyle bs = getBottomStyle();
+    PoseAngles p = getPoseAngles(currentPose);
+
+    // Soft blob shadow on the platform
+    drawCylinderY(0.0f, 0.03f, 0.0f, 1.7f, 1.2f, 0.02f, rgb(0.08f, 0.08f, 0.14f));
 
     glPushMatrix();
-        drawBodyBase(bodyWidth);
-        drawHead();
-        drawHair();
-        drawTop(bodyWidth);
-        drawBottom();
-        drawShoes();
-        drawAccessory(bodyWidth);
+        glTranslatef(0.0f, -p.bodyDrop, 0.0f);
+
+        // Skin torso, neck and shoulders
+        drawTorsoBand(s, 2.35f, 4.05f, 0.0f, SKIN);
+        drawSphere(0.0f, 4.05f, 0.0f, s.chestRx, 0.20f, s.chestRz, SKIN);
+        drawCylinderY(0.0f, 3.95f, 0.0f, 0.20f, 0.20f, 0.50f, SKIN_SHADE);
+
+        drawBottomTorso(s, bs);
+        drawTopTorso(s, ts);
+
+        if (selection[CAT_ACCESSORY] == ACC_BACKPACK)
+            drawBackpack(s);
+
+        drawArm(-1, p, ts, s);
+        drawArm(1, p, ts, s);
+        drawLeg(-1, p, bs, s);
+        drawLeg(1, p, bs, s);
+        drawHeadGroup(s, p);
     glPopMatrix();
+}
+
+const char* poseName(int pose)
+{
+    static const char* names[POSE_COUNT] =
+    {
+        "NEUTRAL", "WAVING", "PEACE SIGN", "HAND ON HIP", "WALKING"
+    };
+    if (pose < 0 || pose >= POSE_COUNT)
+        return "";
+    return names[pose];
 }
