@@ -2,34 +2,20 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Build active C++ file with FreeGLUT",
+            "label": "Build Campus Drip (all modules)",
             "type": "process",
-            "command": "C:\\msys64\\ucrt64\\bin\\g++.exe",
-            "args": [
-                "-g",
-                "-std=c++17",
-                "${file}",
-                "-o",
-                "${fileDirname}\\${fileBasenameNoExtension}.exe",
-                "-lfreeglut",
-                "-lglew32",
-                "-lopengl32",
-                "-lglu32"
-            ],
+            "command": "${workspaceFolder}\\build-modular.bat",
             "options": {
-                "cwd": "${fileDirname}",
-                "env": {
-                    "PATH": "C:\\msys64\\ucrt64\\bin;C:\\msys64\\usr\\bin;${env:PATH}"
-                }
+                "cwd": "${workspaceFolder}"
             },
             "problemMatcher": [
-                "$gcc"
+                "$msCompile"
             ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "detail": "Compiles the currently active C++ file using MSYS2 UCRT64 GCC and FreeGLUT."
+            "detail": "Compiles and links App, World, Character, and Interface."
         }
     ]
 }
